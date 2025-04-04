@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#007bff">
+    <meta name="description" content="Track Solana transactions in real-time">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Solscan Tracker</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css">
+    <link rel="manifest" href="/static/manifest.json">
+    <link rel="apple-touch-icon" href="/static/icon-192x192.png">
+    <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container mt-5">
+        <h1 class="text-center">Solscan Transaction Tracker</h1>
+        <form id="trackForm" class="mt-4">
+            <div class="mb-3">
+                <label for="wallet_address" class="form-label">Địa chỉ ví Solana:</label>
+                <input type="text" class="form-control" id="wallet_address" name="wallet_address" placeholder="Nhập địa chỉ ví" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Theo dõi</button>
+        </form>
+
+        <div id="trackedAccounts" class="mt-4">
+            <h5>Danh sách tài khoản đang theo dõi:</h5>
+            <ul id="accountList" class="list-group"></ul>
+        </div>
+
+        <div id="results" class="mt-4">
+            <!-- Kết quả ban đầu sẽ hiển thị ở đây -->
+        </div>
+
+        <div id="transactionHistory" class="mt-4">
+            <h5>Lịch sử giao dịch:</h5>
+            <div id="historyResults"></div>
+            <div id="viewMoreContainer" class="mt-2"></div>
+            <div id="remainingRequests" class="mt-2"></div>
+        </div>
+
+        <div id="notifications" class="mt-4">
+            <h5>Thông báo giao dịch mới:</h5>
+            <!-- Thông báo sẽ hiển thị ở đây -->
+        </div>
+    </div>
+
+    <script>
+        // Register the service worker
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('/static/service-worker.js')
+                    .then(registration => {
+                        console.log('Service Worker registered with scope:', registration.scope);
+                    })
+                    .catch(error => {
+                        console.error('Service Worker registration failed:', error);
+                    });
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const trackForm = document.getElementById('trackForm');
+            const resultsDiv = document.getElementById('results');
+            const notificationsDiv = document.getElementById('notifications');
+            const accountList = document.getElementById('accountList');
+            const historyResults = document.getElementById('historyResults');
+            const viewMoreContainer = document.getElementById('viewMoreContainer');
+            const remainingRequestsDiv = document.getElementById('remainingRequests');
+
+            // Connect to SocketIO
+            const socket = io();
+
+            socket.on('notification', (data) => {
+                const notification = document.createElement('p');
+                let tokenDetails = '';
+                if (data.token_info && data.token_info.length > 0) {
+                    tokenDetails = data.token_info.map(info => 
+                        `${info.token_name} (${info.token_symbol}): ${info.amount.toFixed(4)} ($${info.value_usd.toFixed(2)})`
+                    ).join(', ');
+                }
+                notification.innerHTML = `
+                    ${data.message} - Actions: ${data.actions.join(', ')}<br>
+                    Tokens: ${tokenDetails || 'N/A'}<br>
+                    Total Value: $${data.total_value_usd.toFixed(2)}<br>
+                    <a href="${data.link}" target="_blank">Xem chi tiết</a>
+                `;
+                notificationsDiv.appendChild(notification);
+            });
+
+            // Fetch and display tracked accounts
+            async function loadTrackedAccounts() {
+                try {
+                    const response = await fetch('/tracked_accounts');
+                    console.log('Tracked accounts response:', response);
+                    const data = await response.json();
+                    console.log('Tracked accounts data:', data);
+                    accountList.innerHTML = '';
+                    data.accounts.forEach(account => {
+                        const li = document.createElement('li');
+                        li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                        li.innerHTML = `
+                            ${account}
+                            <div>
+                                <button class="btn btn-info btn-sm me-2 view-history-btn">Xem lịch sử</button>
+                                <button class="btn btn-danger btn-sm delete-account-btn">Xóa</button>
+                            </div>
+                        `;
+                        li.querySelector('.view-history-btn').addEventListener('click', () => viewHistory(account));
+                        li.querySelector('.delete-account-btn').addEventListener('click', () => deleteAccount(account));
+                        accountList.appendChild(li);
+                    });
+                } catch (error) {
+                    console.error('Error loading tracked accounts:', error);
+                }
+            }
+
+            let currentWalletAddress = null;
+            let lastSignature = null;
+            let displayedTransactions = [];
+
+            async function viewHistory(walletAddress) {
+                currentWalletAddress = walletAddress;
+                displayedTransactions = [];
+                lastSignature = null;
+                historyResults.innerHTML = '<p>Đang lấy lịch sử giao dịch...</p>';
+                viewMoreContainer.innerHTML = '';
+                remainingRequestsDiv.innerHTML = '';
+
+                const response = await fetch('/transaction_history', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ wallet_address: walletAddress })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    historyResults.innerHTML = `<h6>Lịch sử giao dịch của ${walletAddress}:</h6>`;
+                    displayedTransactions = data.transactions;
+                    renderTransactions(displayedTransactions);
+                    lastSignature = data.last_signature;
+                    if (lastSignature && data.transactions.length === 5) {
+                        viewMoreContainer.innerHTML = `<button class="btn btn-secondary view-more-btn">Xem thêm</button>`;
+                        viewMoreContainer.querySelector('.view-more-btn').addEventListener('click', viewMoreTransactions);
+                    }
+                    remainingRequestsDiv.innerHTML = `<p>Số lần yêu cầu còn lại: ${data.remaining_requests}</p>`;
+                } else {
+                    historyResults.innerHTML = `<p style="color:red;">${data.error}</p>`;
+                }
+            }
+
+            async function viewMoreTransactions() {
+                if (!currentWalletAddress || !lastSignature) return;
+
+                const response = await fetch('/more_transactions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ wallet_address: currentWalletAddress, last_signature: lastSignature })
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    displayedTransactions = displayedTransactions.concat(data.transactions);
+                    renderTransactions(displayedTransactions);
+                    lastSignature = data.last_signature;
+                    if (!lastSignature || data.transactions.length < 5) {
+                        viewMoreContainer.innerHTML = '';
+                    }
+                    remainingRequestsDiv.innerHTML = `<p>Số lần yêu cầu còn lại: ${data.remaining_requests}</p>`;
+                } else {
+                    historyResults.innerHTML += `<p style="color:red;">${data.error}</p>`;
+                    viewMoreContainer.innerHTML = '';
+                }
+            }
+
+            function renderTransactions(transactions) {
+                historyResults.innerHTML = `<h6>Lịch sử giao dịch của ${currentWalletAddress}:</h6>`;
+                if (transactions.length > 0) {
+                    transactions.forEach(tx => {
+                        let tokenDetails = '';
+                        if (tx.token_info && tx.token_info.length > 0) {
+                            tokenDetails = tx.token_info.map(info => 
+                                `${info.token_name} (${info.token_symbol}): ${info.amount.toFixed(4)} ($${info.value_usd.toFixed(2)})`
+                            ).join(', ');
+                        }
+                        historyResults.innerHTML += `
+                            <p>
+                                Giao dịch: <a href="${tx.link}" target="_blank">${tx.signature}</a><br>
+                                Actions: ${tx.actions.join(', ')}<br>
+                                Tokens: ${tokenDetails || 'N/A'}<br>
+                                Total Value: $${tx.total_value_usd.toFixed(2)}
+                            </p>
+                        `;
+                    });
+                } else {
+                    historyResults.innerHTML += `<p>Không tìm thấy giao dịch nào.</p>`;
+                }
+            }
+
+            async function deleteAccount(walletAddress) {
+                const response = await fetch('/delete_account', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ wallet_address: walletAddress })
+                });
+                const data = await response.json();
+                alert(data.message || data.error);
+                loadTrackedAccounts();
+            }
+
+            trackForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const walletAddress = document.getElementById('wallet_address').value;
+                resultsDiv.innerHTML = '<p>Đang lấy dữ liệu...</p>';
+
+                try {
+                    const response = await fetch('/track', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ wallet_address: walletAddress })
+                    });
+
+                    console.log('Track response:', response);
+                    const data = await response.json();
+                    console.log('Track data:', data);
+
+                    if (response.ok) {
+                        resultsDiv.innerHTML = `<h5>Giao dịch gần đây:</h5>`;
+                        if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+                            data.transactions.forEach(tx => {
+                                let tokenDetails = '';
+                                if (tx.token_info && tx.token_info.length > 0) {
+                                    tokenDetails = tx.token_info.map(info => 
+                                        `${info.token_name} (${info.token_symbol}): ${info.amount.toFixed(4)} ($${info.value_usd.toFixed(2)})`
+                                    ).join(', ');
+                                }
+                                resultsDiv.innerHTML += `
+                                    <p>
+                                        Giao dịch: <a href="${tx.link}" target="_blank">${tx.signature}</a><br>
+                                        Actions: ${tx.actions.join(', ')}<br>
+                                        Tokens: ${tokenDetails || 'N/A'}<br>
+                                        Total Value: $${tx.total_value_usd.toFixed(2)}
+                                    </p>
+                                `;
+                            });
+                        } else {
+                            resultsDiv.innerHTML += `<p>Không tìm thấy giao dịch nào.</p>`;
+                        }
+                    } else {
+                        resultsDiv.innerHTML = `<p style="color:red;">${data.error}</p>`;
+                    }
+                } catch (error) {
+                    console.error('Error in trackForm:', error);
+                    resultsDiv.innerHTML = `<p style="color:red;">Lỗi: ${error.message}</p>`;
+                } finally {
+                    console.log('Calling loadTrackedAccounts');
+                    loadTrackedAccounts();
+                }
+            });
+
+            // Load tracked accounts on page load
+            loadTrackedAccounts();
+        });
+    </script>
+</body>
+</html>
