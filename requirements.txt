@@ -1,4 +1,6 @@
 flask
-gunicorn
-eventlet
+flask-socketio
 requests
+eventlet
+gunicorn
+python-dotenv

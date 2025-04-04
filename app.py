@@ -3,10 +3,13 @@ from flask_socketio import SocketIO, emit
 import requests
 import time
 import threading
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'
-socketio = SocketIO(app)
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")
+socketio = SocketIO(app, async_mode='eventlet')
 
 # Serve static files from the 'static' directory
 @app.route('/static/<path:path>')
@@ -14,7 +17,7 @@ def serve_static(path):
     return send_from_directory('static', path)
 
 # Replace with your Helius API key
-HELIUS_API_KEY = "d2f621a1-df7c-4a3f-a2fd-6c357d796bab"
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
 tracked_accounts = {}
 latest_signatures = {}
@@ -309,4 +312,5 @@ def more_transactions():
     })
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000)
